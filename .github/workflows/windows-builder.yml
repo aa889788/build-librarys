@@ -1,0 +1,157 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Build Windows Libraries
+
+# Controls when the action will run. Triggers the workflow on push or pull request
+# events but only for the regression2 branch
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+env:
+  OPENCV_REF: 4.5.3
+  FASTDEPLOY_VER: 1.0.0
+  FASTDEPLOY_REF: 49061bfb1c6d235ced7489f7d5c02930bb3a2107
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+
+    strategy:
+      matrix:
+        os: [macos, ubuntu, windows]
+
+    defaults:
+      run:
+        shell: bash
+    # The type of runner that the job will run on
+    runs-on: ${{ matrix.os }}-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      - name: Setup ccache
+        uses: Chocobo1/setup-ccache-action@v1
+        with:
+          windows_compile_environment: msvc
+
+      - name: Install Linux Packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential cmake
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        id: msvc-env
+        if: runner.os == 'Windows'
+
+      - name: Setup MSVC environment
+        if: steps.msvc-env.conclusion == 'success'
+        run: |
+          echo "CMAKE_GENERATOR=Ninja" >> $GITHUB_ENV
+          echo "CC=cl" >> $GITHUB_ENV
+          echo "CXX=cl" >> $GITHUB_ENV
+
+      - name: Clone OpenCV
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          git clone https://github.com/opencv/opencv.git -b ${{ env.OPENCV_REF }} --depth=1
+
+      - name: Build OpenCV
+        run: |
+            cd ${GITHUB_WORKSPACE}/opencv
+            mkdir build && cd build
+            cmake .. \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_CCACHE=ON \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DWITH_IPP=OFF \
+              -DWITH_LAPACK=OFF \
+              -DWITH_EIGEN=OFF \
+              -DWITH_JPEG=ON \
+              -DWITH_PNG=ON \
+              -DWITH_PROTOBUF=OFF \
+              -DWITH_TIFF=ON \
+              -DBUILD_TESTS=OFF \
+              -DBUILD_JAVA=OFF \
+              -DBUILD_PERF_TESTS=OFF \
+              -DBUILD_EXAMPLES=OFF \
+              -DWITH_FFMPEG=OFF \
+              -DOPENCV_FORCE_3RDPARTY_BUILD=ON \
+              -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/build/opencv \
+              -DBUILD_opencv_world=OFF
+            cmake --build . --target install --parallel ${PARALLEL_JOBS:-$(nproc --all)}
+
+      - name: Package OpenCV
+        run: |
+            cd ${GITHUB_WORKSPACE}
+            cd build
+            tar -czvf OpenCV-${{ runner.os }}.tar.gz opencv
+
+      - name: Upload OpenCV
+        uses: actions/upload-artifact@v3
+        with:
+          name: opencv-${{ runner.os }}
+          path: build/OpenCV-${{ runner.os }}.tar.gz
+
+      - name: Clone FastDeploy
+        uses: actions/checkout@v3
+        with:
+          repository: PaddlePaddle/FastDeploy
+          path: FastDeploy
+          ref: ${{ env.FASTDEPLOY_REF }}
+
+      - name: Set OpenCV
+        if: runner.os == 'Windows'
+        run: |
+            echo "OpenCV=/staticlib" >> $GITHUB_ENV
+
+      - name: Configure FastDeploy
+        run: |
+            cd ${GITHUB_WORKSPACE}/FastDeploy
+            mkdir build && cd build
+            cmake \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_ORT_BACKEND=ON \
+              -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/build/fastdeploy \
+              -DENABLE_VISION=ON \
+              -DBUILD_EXAMPLES=OFF \
+              -DOPENCV_DIRECTORY=${GITHUB_WORKSPACE}/build/opencv${OpenCV} \
+              -DOpenCV_DIR=${GITHUB_WORKSPACE}/build/opencv${OpenCV} \
+              -DCMAKE_INSTALL_RPATH='$ORIGIN/:$ORIGIN/../third_libs/install/onnxruntime/lib:$ORIGIN/../third_libs/install/paddle2onnx/lib' \
+              ..
+
+      - name: Patch FastDeploy
+        if: runner.os == 'Windows'
+        run: |
+            cd ${GITHUB_WORKSPACE}/FastDeploy/build
+            sed -i 's/\/MD /\/MT /g' build.ninja
+
+      - name: Build FastDeploy
+        run: |
+            cd ${GITHUB_WORKSPACE}/FastDeploy/build
+            cmake --build . --target install --parallel ${PARALLEL_JOBS:-$(nproc --all)}
+
+      - name: Patch FastDeploy
+        run: |
+            cd ${GITHUB_WORKSPACE}/build/fastdeploy
+            sed -i'' -e '/set(OPENCV_DIRECTORY/d' FastDeploy.cmake
+            
+      - name: Package FastDeploy
+        run: |
+            cd ${GITHUB_WORKSPACE}/build
+            tar -czvf FastDeploy${{ runner.os }}.tar.gz fastdeploy
+
+
+      - name: Upload FastDeploy
+        uses: actions/upload-artifact@v3
+        with:
+          name: fastdeploy-${{ runner.os }}
+          path: build/FastDeploy${{ runner.os }}.tar.gz
+
